@@ -84,6 +84,11 @@ else
   ))
   if host_os == 'linux'
     qga_ss.add(files('commands-linux.c'))
+  elif host_os == 'freebsd'
+    qga_ss.add(files(
+      'commands-bsd.c',
+      'commands-freebsd.c'
+    ))
   elif host_os in bsd_oses
     qga_ss.add(files('commands-bsd.c'))
   endif
