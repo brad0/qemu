@@ -57,6 +57,7 @@ bsd_oses = ['gnu/kfreebsd', 'freebsd', 'netbsd', 'openbsd', 'dragonfly', 'darwin
 supported_oses = ['windows', 'freebsd', 'netbsd', 'openbsd', 'darwin', 'sunos', 'linux', 'emscripten']
 supported_cpus = ['ppc64', 's390x', 'riscv64', 'x86_64',
   'aarch64', 'loongarch64', 'sparc64', 'wasm64']
+qga_oses = ['windows', 'freebsd', 'netbsd', 'openbsd', 'sunos', 'linux']
 
 cpu = host_machine.cpu_family()
 
@@ -257,7 +258,7 @@ have_tools = get_option('tools') \
   .allowed()
 have_ga = get_option('guest_agent') \
   .disable_auto_if(not have_system and not have_tools) \
-  .require(host_os in ['sunos', 'linux', 'windows', 'freebsd', 'netbsd', 'openbsd'],
+  .require(host_os in qga_oses,
            error_message: 'unsupported OS for QEMU guest agent') \
   .allowed()
 have_block = have_system or have_tools
