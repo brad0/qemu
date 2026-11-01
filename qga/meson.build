@@ -96,6 +96,9 @@ qga_libs = []
 if host_os == 'freebsd'
   qga_libs += ['-ldevstat']
 endif
+if host_os == 'netbsd'
+  qga_libs += ['-lutil']
+endif
 if host_os == 'windows'
   qga_libs += ['-lws2_32', '-lwinmm', '-lpowrprof', '-lwtsapi32', '-lwininet', '-liphlpapi', '-lnetapi32',
                '-lsetupapi', '-lcfgmgr32', '-luserenv', '-lpdh' ]

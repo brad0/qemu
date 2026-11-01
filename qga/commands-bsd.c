@@ -45,6 +45,11 @@ typedef struct statfs bsd_fsinfo_t;
 #ifdef CONFIG_FREEBSD
 #include <devstat.h>
 #endif
+#ifdef __NetBSD__
+#include <sys/sysctl.h>
+#include <sys/iostat.h>
+#include <util.h>
+#endif
 
 bool build_fs_mount_list(FsMountList *mounts, Error **errp)
 {
@@ -244,6 +249,168 @@ GuestFilesystemInfoList *qmp_guest_get_fsinfo(Error **errp)
     free_fs_mount_list(&mounts);
     return ret;
 }
+
+#ifdef __NetBSD__
+static uint64_t sec_usec_to_msec(uint32_t sec, uint32_t usec)
+{
+    return (uint64_t)sec * 1000ULL + usec / 1000;
+}
+
+#define DISKSTATS_MAX_TRIES 5
+
+/*
+ * Read a sysctl whose length can grow between the size query and the
+ * read.  NetBSD does not fail with ENOMEM when the buffer is too small;
+ * it copies what fits and returns success, so treat a buffer with less
+ * than one item of room left as possibly truncated and retry.
+ */
+static void *netbsd_sysctl_get(const int *mib, u_int miblen, size_t item,
+                               size_t *lenp, Error **errp)
+{
+    int tries;
+
+    for (tries = 0; tries < DISKSTATS_MAX_TRIES; tries++) {
+        g_autofree void *buf = NULL;
+        size_t len, alloc;
+
+        if (sysctl(mib, miblen, NULL, &len, NULL, 0) == -1) {
+            error_setg_errno(errp, errno, "cannot get sysctl size");
+            return NULL;
+        }
+        alloc = len + 4 * item;
+        buf = g_malloc0(alloc);
+        len = alloc;
+        if (sysctl(mib, miblen, buf, &len, NULL, 0) == -1) {
+            error_setg_errno(errp, errno, "cannot read sysctl");
+            return NULL;
+        }
+        if (alloc - len >= item) {
+            *lenp = len;
+            return g_steal_pointer(&buf);
+        }
+    }
+
+    error_setg(errp, "sysctl keeps changing size");
+    return NULL;
+}
+
+static bool netbsd_disk_devno(const char *path, GuestDiskStatsInfo *info)
+{
+    struct stat st;
+
+    if (stat(path, &st) == 0 && S_ISBLK(st.st_mode)) {
+        info->major = major(st.st_rdev);
+        info->minor = minor(st.st_rdev);
+        return true;
+    }
+    return false;
+}
+
+static GuestDiskStatsInfo *
+guest_diskstats_info_new(const struct io_sysctl *io, const char *name,
+                         int rawpart)
+{
+    GuestDiskStatsInfo *diskstatinfo;
+    GuestDiskStats *diskstat;
+    bool found = false;
+
+    diskstatinfo = g_new0(GuestDiskStatsInfo, 1);
+    diskstatinfo->name = g_strdup(name);
+
+    /*
+     * The kernel disk statistics carry no device numbers; take them
+     * from the raw partition device node, which covers the whole disk.
+     * Wedges (dk*) have no partitions, so fall back to the plain node.
+     * If neither exists, report 0.
+     */
+    if (rawpart >= 0) {
+        g_autofree char *devpath = g_strdup_printf(_PATH_DEV "%s%c", name,
+                                                   'a' + rawpart);
+
+        found = netbsd_disk_devno(devpath, diskstatinfo);
+    }
+    if (!found) {
+        g_autofree char *devpath = g_strdup_printf(_PATH_DEV "%s", name);
+
+        netbsd_disk_devno(devpath, diskstatinfo);
+    }
+
+    /*
+     * NetBSD tracks transfer counts and bytes per direction, but busy
+     * time only in aggregate, and has no discard, flush or merge
+     * counters.  busysum is busy time weighted by the number of I/Os in
+     * flight; queue wait time is accounted separately and not included.
+     */
+    diskstat = g_new0(GuestDiskStats, 1);
+    diskstat->has_read_ios = true;
+    diskstat->read_ios = io->rxfer;
+    diskstat->has_read_sectors = true;
+    diskstat->read_sectors = io->rbytes / BDRV_SECTOR_SIZE;
+
+    diskstat->has_write_ios = true;
+    diskstat->write_ios = io->wxfer;
+    diskstat->has_write_sectors = true;
+    diskstat->write_sectors = io->wbytes / BDRV_SECTOR_SIZE;
+
+    if (io->busy >= 0) {
+        diskstat->has_ios_pgr = true;
+        diskstat->ios_pgr = io->busy;
+    }
+
+    diskstat->has_total_ticks = true;
+    diskstat->total_ticks = sec_usec_to_msec(io->time_sec, io->time_usec);
+
+    diskstat->has_weight_ticks = true;
+    diskstat->weight_ticks = sec_usec_to_msec(io->busysum_sec,
+                                              io->busysum_usec);
+
+    diskstatinfo->stats = diskstat;
+    return diskstatinfo;
+}
+
+GuestDiskStatsInfoList *qmp_guest_get_diskstats(Error **errp)
+{
+    GuestDiskStatsInfoList *head = NULL, **tail = &head;
+    int names_mib[] = { CTL_HW, HW_DISKNAMES };
+    int stats_mib[] = { CTL_HW, HW_IOSTATS, sizeof(struct io_sysctl) };
+    g_autofree char *names = NULL;
+    g_auto(GStrv) disks = NULL;
+    g_autofree struct io_sysctl *stats = NULL;
+    int rawpart = getrawpartition();
+    size_t len, i;
+
+    names = netbsd_sysctl_get(names_mib, ARRAY_SIZE(names_mib),
+                              IOSTATNAMELEN + 1, &len, errp);
+    if (!names) {
+        return NULL;
+    }
+    disks = g_strsplit(names, " ", -1);
+
+    stats = netbsd_sysctl_get(stats_mib, ARRAY_SIZE(stats_mib),
+                              sizeof(struct io_sysctl), &len, errp);
+    if (!stats) {
+        return NULL;
+    }
+
+    for (i = 0; i < len / sizeof(struct io_sysctl); i++) {
+        g_autofree char *name = g_strndup(stats[i].name,
+                                          sizeof(stats[i].name));
+
+        /*
+         * hw.iostats also covers tapes and NFS mounts, and the kernel
+         * leaves its type field unset, so match against hw.disknames,
+         * which lists disks only.
+         */
+        if (!g_strv_contains((const char * const *)disks, name)) {
+            continue;
+        }
+        QAPI_LIST_APPEND(tail, guest_diskstats_info_new(&stats[i], name,
+                                                        rawpart));
+    }
+
+    return head;
+}
+#endif /* __NetBSD__ */
 
 #ifdef CONFIG_FREEBSD
 static uint64_t bintime_to_msec(const struct bintime *bt)

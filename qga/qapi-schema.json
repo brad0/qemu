@@ -1666,7 +1666,7 @@
            '*total-ticks': 'uint64',
            '*weight-ticks': 'uint64'
            },
-  'if': { 'any': ['CONFIG_LINUX', 'CONFIG_FREEBSD'] } }
+  'if': { 'any': ['CONFIG_LINUX', 'CONFIG_FREEBSD', 'CONFIG_NETBSD'] } }
 
 ##
 # @GuestDiskStatsInfo:
@@ -1684,7 +1684,7 @@
            'major': 'uint64',
            'minor': 'uint64',
            'stats': 'GuestDiskStats' },
-  'if': { 'any': ['CONFIG_LINUX', 'CONFIG_FREEBSD'] } }
+  'if': { 'any': ['CONFIG_LINUX', 'CONFIG_FREEBSD', 'CONFIG_NETBSD'] } }
 
 ##
 # @guest-get-diskstats:
@@ -1696,7 +1696,7 @@
 ##
 { 'command': 'guest-get-diskstats',
   'returns': ['GuestDiskStatsInfo'],
-  'if': { 'any': ['CONFIG_LINUX', 'CONFIG_FREEBSD'] }
+  'if': { 'any': ['CONFIG_LINUX', 'CONFIG_FREEBSD', 'CONFIG_NETBSD'] }
 }
 
 ##

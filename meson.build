@@ -2438,6 +2438,7 @@ config_host_data.set('CONFIG_BDRV_WHITELIST_TOOLS', get_option('block_drv_whitel
 config_host_data.set('CONFIG_BRLAPI', brlapi.found())
 config_host_data.set('CONFIG_BSD', host_os in bsd_oses)
 config_host_data.set('CONFIG_FREEBSD', host_os == 'freebsd')
+config_host_data.set('CONFIG_NETBSD', host_os == 'netbsd')
 config_host_data.set('CONFIG_CAPSTONE', capstone.found())
 config_host_data.set('CONFIG_COCOA', cocoa.found())
 config_host_data.set('CONFIG_DARWIN', host_os == 'darwin')
