@@ -45,6 +45,11 @@ typedef struct statfs bsd_fsinfo_t;
 #ifdef CONFIG_FREEBSD
 #include <devstat.h>
 #endif
+#ifdef __OpenBSD__
+#include <sys/sysctl.h>
+#include <sys/disk.h>
+#include <util.h>
+#endif
 
 bool build_fs_mount_list(FsMountList *mounts, Error **errp)
 {
@@ -244,6 +249,110 @@ GuestFilesystemInfoList *qmp_guest_get_fsinfo(Error **errp)
     free_fs_mount_list(&mounts);
     return ret;
 }
+
+#ifdef __OpenBSD__
+static uint64_t timeval_to_msec(const struct timeval *tv)
+{
+    return (uint64_t)tv->tv_sec * 1000ULL + tv->tv_usec / 1000;
+}
+
+static GuestDiskStatsInfo *
+guest_diskstats_info_new(const struct diskstats *ds, int rawpart)
+{
+    GuestDiskStatsInfo *diskstatinfo;
+    GuestDiskStats *diskstat;
+    struct stat st;
+
+    diskstatinfo = g_new0(GuestDiskStatsInfo, 1);
+    diskstatinfo->name = g_strndup(ds->ds_name, sizeof(ds->ds_name));
+
+    /*
+     * The kernel disk statistics carry no device numbers; take them
+     * from the raw partition device node, which covers the whole disk.
+     * If that node is missing (e.g. a minimal /dev), report 0.
+     */
+    if (rawpart >= 0) {
+        g_autofree char *devpath = g_strdup_printf(_PATH_DEV "%s%c",
+                                                   diskstatinfo->name,
+                                                   'a' + rawpart);
+
+        if (stat(devpath, &st) == 0 && S_ISBLK(st.st_mode)) {
+            diskstatinfo->major = major(st.st_rdev);
+            diskstatinfo->minor = minor(st.st_rdev);
+        }
+    }
+
+    /*
+     * OpenBSD tracks transfer counts and bytes per direction, but busy
+     * time only in aggregate, and has no discard, flush or merge
+     * counters.
+     */
+    diskstat = g_new0(GuestDiskStats, 1);
+    diskstat->has_read_ios = true;
+    diskstat->read_ios = ds->ds_rxfer;
+    diskstat->has_read_sectors = true;
+    diskstat->read_sectors = ds->ds_rbytes / BDRV_SECTOR_SIZE;
+
+    diskstat->has_write_ios = true;
+    diskstat->write_ios = ds->ds_wxfer;
+    diskstat->has_write_sectors = true;
+    diskstat->write_sectors = ds->ds_wbytes / BDRV_SECTOR_SIZE;
+
+    if (ds->ds_busy >= 0) {
+        diskstat->has_ios_pgr = true;
+        diskstat->ios_pgr = ds->ds_busy;
+    }
+
+    diskstat->has_total_ticks = true;
+    diskstat->total_ticks = timeval_to_msec(&ds->ds_time);
+
+    diskstatinfo->stats = diskstat;
+    return diskstatinfo;
+}
+
+#define DISKSTATS_MAX_TRIES 5
+
+GuestDiskStatsInfoList *qmp_guest_get_diskstats(Error **errp)
+{
+    GuestDiskStatsInfoList *head = NULL, **tail = &head;
+    int mib[] = { CTL_HW, HW_DISKSTATS };
+    g_autofree struct diskstats *stats = NULL;
+    size_t len, i;
+    int rawpart = getrawpartition();
+    int tries;
+
+    /* Disks may attach or detach between the two sysctl calls; retry. */
+    for (tries = 0; tries < DISKSTATS_MAX_TRIES; tries++) {
+        if (sysctl(mib, ARRAY_SIZE(mib), NULL, &len, NULL, 0) == -1) {
+            error_setg_errno(errp, errno, "cannot get size of hw.diskstats");
+            return NULL;
+        }
+        if (len == 0) {
+            return NULL;
+        }
+        len += 4 * sizeof(struct diskstats);
+        g_free(stats);
+        stats = g_malloc(len);
+        if (sysctl(mib, ARRAY_SIZE(mib), stats, &len, NULL, 0) == 0) {
+            break;
+        }
+        if (errno != ENOMEM) {
+            error_setg_errno(errp, errno, "cannot read hw.diskstats");
+            return NULL;
+        }
+    }
+    if (tries == DISKSTATS_MAX_TRIES) {
+        error_setg(errp, "hw.diskstats keeps changing size");
+        return NULL;
+    }
+
+    for (i = 0; i < len / sizeof(struct diskstats); i++) {
+        QAPI_LIST_APPEND(tail, guest_diskstats_info_new(&stats[i], rawpart));
+    }
+
+    return head;
+}
+#endif /* __OpenBSD__ */
 
 #ifdef CONFIG_FREEBSD
 static uint64_t bintime_to_msec(const struct bintime *bt)
