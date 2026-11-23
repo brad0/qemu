@@ -28,6 +28,13 @@ arch=$(uname -m)
 # make sure we have a standard umask
 umask 022
 
+if command dd if=/dev/null of=/dev/null status=noxfer >/dev/null 2>&1
+then
+    DD_NOXFER="status=noxfer"
+else
+    DD_NOXFER=""
+fi
+
 # bail out, setting up .notrun file
 _notrun()
 {
@@ -54,19 +61,7 @@ fi
 
 dd()
 {
-   if [ "$HOSTOS" == "Linux" ]
-   then
-        command dd --help | grep noxfer > /dev/null 2>&1
-
-        if [ "$?" -eq 0 ]
-            then
-                command dd status=noxfer $@
-            else
-                command dd $@
-            fi
-   else
-        command dd $@
-   fi
+    command dd $DD_NOXFER "$@"
 }
 
 # poke_file 'test.img' 512 '\xff\xfe'
